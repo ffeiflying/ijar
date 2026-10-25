@@ -1,0 +1,1 @@
+Task18 same-object paired diagnosis motivates this change: object-only CF validation0.737, object type0.80672, relation type0.57722. In21same-object relation pairs17CF ties; in14same-object attribute pairs10ties. Thus semantic predicate binding is a structural missing component, not merely a poor fusion rule.

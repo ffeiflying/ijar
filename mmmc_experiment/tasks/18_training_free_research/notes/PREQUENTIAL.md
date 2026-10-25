@@ -1,0 +1,9 @@
+# Local prequential visual counterevidence (fourth candidate)
+
+No training, no answer generation. Literal input word w_t is evaluated at its predecessor position t−1, avoiding self-inclusion. All readouts use internal post-attention states, not generated answer probabilities. Actual attention output decomposes linearly as o_V+o_T, where V indexes image tokens and T all other tokens. Numerically audit this decomposition against the real attention output.
+
+For base residual h and actual post-attention state h_joint, read frozen distributions from RMSNorm(h), RMSNorm(h+o_V), RMSNorm(h+o_T), RMSNorm(h_joint). Local visual evidence deltaV=log p_joint(w_t)−log p_(h+o_T)(w_t); local textual evidence deltaT=log p_joint(w_t)−log p_(h+o_V)(w_t). Source deletion changes the local readout only, not the transformer computation or the input. Because h already contains contextualized multimodal information, this is NOT a full causal image/no-image evaluation.
+
+Operational simple supports: a positive delta supports observed-token plausibility, negative delta opposes it, residual exp(−abs delta) stays unknown. Aggregate different words only as task-level scores; do not pretend they are mutually exclusive categories. Correlated layer views at the SAME observed token are tempered by mean effective weights. Compare conflict with a categorical input assertion, visual/text source conflict, ignorance/BetP, and same-feature plain NLL/contrast controls.
+
+Dev200: selected CF0.6747, NLLcontrol0.7864, block0CF0.52335. Each row explicitly audited one vision encoder call and one language prefill, zero generated tokens. Max attention reconstruction relative error0.005589, within bfloat16 expected roundoff. Median full seven-layer/four-view diagnostic extraction0.536s excluding model load; this is not minimal detector latency. Validation pending. Weak devCF suggests local negative evidence is not by itself a strong modality-conflict signal. No0.85 claim.

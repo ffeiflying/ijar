@@ -1,0 +1,49 @@
+# Local tooling and publication copies
+.agents/
+.aws/
+.codex/
+.planning/
+.superpowers/
+github_export/
+.env
+.env.*
+*.pem
+*.key
+# Python and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+# Model/download/dependency caches
+hf_cache/
+cache/
+vendor/
+site-packages/
+checkpoints/
+weights/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+# Datasets and generated experiment artifacts
+datasets/
+data/
+images/
+results/
+logs/
+*.csv
+*.jsonl
+*.arrow
+*.parquet
+*.npy
+*.npz
+*.pkl
+*.log
+*.zip
+*.tar
+*.gz
+log_*.txt
+*_metrics.txt

@@ -1,0 +1,30 @@
+{
+  "files": 511,
+  "bytes": 3515004,
+  "excluded_directory_names": [
+    ".agents",
+    ".aws",
+    ".codex",
+    ".git",
+    ".ipynb_checkpoints",
+    ".planning",
+    ".pytest_cache",
+    ".superpowers",
+    ".venv",
+    "__pycache__",
+    "cache",
+    "checkpoints",
+    "data",
+    "datasets",
+    "github_export",
+    "hf_cache",
+    "images",
+    "logs",
+    "results",
+    "site-packages",
+    "vendor",
+    "venv",
+    "weights"
+  ],
+  "note": "Source/documentation only; no model, dataset, generated results or environment. Credential pattern check is heuristic."
+}

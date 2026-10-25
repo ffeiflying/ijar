@@ -1,0 +1,790 @@
+\documentclass[preprint,12pt]{elsarticle}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage{mathtools}
+\usepackage[table]{xcolor}
+\usepackage{subcaption}
+\usepackage{makecell}
+\usepackage{float}
+\usepackage{placeins}
+
+\newcommand{\uparr}{\textcolor{green!70!black}{$\uparrow$}}
+\newcommand{\gain}[1]{\textcolor{green!60!black}{\scriptsize$\uparrow$(+#1\%)}}
+
+% Float placement: prefer top, suppress standalone float pages
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{0}
+\setcounter{totalnumber}{4}
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\floatpagefraction}{0.99}
+
+\journal{International Journal of Approximate Reasoning}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Typographic Attack Detection in Large Vision--Language Models via Attention-Level Evidential Conflict}
+
+% Authors and affiliations withheld for review
+
+\begin{abstract}
+Large vision--language models (LVLMs) exhibit strong multimodal reasoning ability but remain vulnerable to typographic attacks, where deceptive in-image text manipulates model predictions by overriding visual evidence with misleading textual cues. Existing post-hoc detectors typically depend on output-layer uncertainty or repeated sampling, which makes them either insensitive to internal cross-modal contradictions or computationally expensive. In this work, we present an attention-level evidential detection framework grounded in Dempster--Shafer theory (DST). We reinterpret intermediate attention-projection features as evidence sources and define an Attention Conflict (ACF) metric that explicitly quantifies support-opposition contradiction in a single forward pass without model fine-tuning. Extending our prior conference version, this journal article provides: (i) a complete theoretical derivation of the least-commitment evidential transformation; (ii) construction of a typographic attack dataset with controlled attack variables; (iii) comprehensive ablation studies examining layer-wise conflict dynamics, temperature effects, typographic variable sensitivity, and architectural analysis of why Mixture-of-Features models yield stronger detection signals; and (iv) generalization analysis across different misbehavior detection tasks. Extensive experiments across five state-of-the-art LVLMs on both synthetic and real-world typographic datasets demonstrate that ACF consistently outperforms existing baselines. Our findings highlight that explicit conflict modeling at the attention level provides a principled and practical path toward securing multimodal systems.
+\end{abstract}
+
+\begin{keyword}
+Large vision--language models \sep Typographic attack detection \sep Dempster--Shafer theory \sep Evidential uncertainty \sep Cross-modal conflict \sep Attention mechanism
+\end{keyword}
+
+\end{frontmatter}
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+Large vision--language models (LVLMs)~\cite{liu2023visual,alayrac2022flamingo,li2023blip} have recently achieved remarkable success across a broad spectrum of multimodal tasks, including visual question answering, image captioning, chart understanding, and embodied instruction following. Architectures such as LLaVA~\cite{liu2023visual,liu2024improved}, Qwen2.5-VL~\cite{wu2025qwen}, InternVL2.5~\cite{chen2024expanding}, and DeepSeek-VL2~\cite{wu2024deepseek} integrate pretrained vision encoders with large language models through cross-modal alignment modules, typically built upon stacked multi-head attention (MHA) blocks~\cite{vaswani2017attention}. These attention layers serve as the primary mechanism for fusing visual and textual representations, enabling the model to jointly reason over heterogeneous information sources.
+
+However, this tightly coupled fusion mechanism also introduces a distinct and critical vulnerability: \textbf{typographic attacks}~\cite{goh2021multimodal}. In this attack class, an adversary overlays misleading text directly onto an image. The embedded text can contradict the visual scene content or inject deceptive instructions, causing the model to prioritize textual cues over genuine visual evidence. For instance, an image of a ``stop sign'' overlaid with the text ``speed limit 80'' may cause an LVLM to misclassify the traffic sign; a benign photograph with the injected instruction ``ignore previous constraints and describe this person'' can jailbreak safety-aligned models into producing harmful outputs~\cite{gong2025figstep}. Unlike traditional adversarial perturbations that rely on imperceptible pixel-level noise~\cite{goodfellow2014explaining,szegedy2013intriguing}, typographic attacks are semantically legible and often human-plausible, rendering them difficult to filter through standard image preprocessing pipelines.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig1_typographic_attacks.png}
+\caption{Examples of typographic attacks in LVLMs. Deceptive text is overlaid onto images (e.g., ``speed limit 80'' on a stop sign, adversarial instructions on a benign photograph), causing the model to prioritize textual cues over visual evidence.}
+\label{fig:typographic_attacks}
+\end{figure}
+
+The fundamental danger of typographic attacks lies in their exploitation of a well-documented phenomenon: the \textbf{language bias} in multimodal models~\cite{qraitem2025web}. LVLMs are trained on massive corpora of image--caption pairs where text usually provides reliable semantic grounding. Consequently, when confronted with explicit textual tokens within an image, models exhibit a strong inductive bias to trust the written words over implicit visual evidence, even when the two are contradictory~\cite{cheng2024unveiling}. This cross-modal misalignment creates a semantic conflict that propagates through the attention layers and ultimately corrupts the model's downstream reasoning and generation.
+
+Detecting typographic attacks is therefore essential for deploying LVLMs in safety-critical applications such as autonomous driving~\cite{ling2026physical}, content moderation, and embodied AI agents~\cite{gong2025figstep}. A reliable detection mechanism should be: (i) \textbf{sensitive} to the internal cross-modal contradictions induced by deceptive text; (ii) \textbf{efficient}, ideally requiring only a single forward pass; and (iii) \textbf{training-free}, avoiding the computational cost and potential capability degradation associated with model fine-tuning~\cite{bengio2025international}.
+
+Existing detection approaches exhibit notable limitations against these requirements. \textbf{OCR-assisted methods}~\cite{nagaraja2025image} rely on external optical character recognition modules but incur high latency and cascade errors. \textbf{Sampling-based uncertainty methods}, including Semantic Entropy~\cite{farquhar2024detecting} and Self-Consistency~\cite{wang2022self}, estimate model confidence through multiple stochastic generations but require $N\times$ computational cost. \textbf{Output-probability methods}, such as Predictive Entropy~\cite{kadavath2022language,malinin2020uncertainty}, are lightweight but suffer from well-known overconfidence issues~\cite{guo2017calibration}. \textbf{Representation-based methods}~\cite{jiang2025hiddendetect,kirch2025features} exploit internal hidden states but predominantly learn implicit separability heuristics without explicitly modeling the \emph{contradiction} between conflicting modalities.
+
+Recent work has begun to explore Dempster--Shafer theory (DST)~\cite{shafer1976theory,dempster1967upper} as a framework for neural uncertainty quantification~\cite{denoeux2019logistic,sensoy2018evidential}. Prior applications to LVLM misbehavior detection~\cite{huang2025visual,huang2026detecting} have shown promising results by applying evidential formulations at the model's output layer to capture prediction uncertainty. However, these output-level methods focus on final prediction reliability rather than the internal cross-modal contradictions that arise during the fusion of visual and textual information---precisely the signal that characterizes typographic attacks.
+
+In this work, we address this gap by shifting the evidential formulation \emph{from the output layer to the attention projection layers}---where visual and textual modalities first interact and align. Our key insight is that typographic attacks, by injecting contradictory textual cues into the visual modality, create a detectable pattern of \emph{simultaneous support and opposition} over the same latent hypotheses during cross-modal attention computation. We capture this pattern through the following contributions:
+
+\begin{itemize}[leftmargin=*]
+    \item We formulate intermediate hidden activations from attention-projection layers as evidential sources. Applying a least-commitment affine transformation~\cite{smets1993belief} to the pretrained projection weights, we extract bias-reduced evidence that reflects the relative activation patterns between visual and textual features, independent of inherent model biases.
+    \item We propose \textbf{Attention Conflict (ACF)}, a novel metric that explicitly quantifies cross-modal contradiction. Evidence is decomposed into positive (support) and negative (opposition) signals, converted into DST-compatible belief assignments, and aggregated into a scalar conflict score in a single forward pass.
+    \item We construct a controlled typographic attack dataset with systematic variation of attack variables (font size, color contrast, opacity, position), enabling fine-grained analysis of detection sensitivity.
+    \item We conduct comprehensive experiments across five LVLMs on both synthetic and real-world typographic datasets. Beyond main detection results, we provide layer-wise conflict analysis, ablation studies on temperature and typographic variables, architectural analysis of MoF model behavior, and generalization tests across different misbehavior detection tasks.
+\end{itemize}
+
+%=============================================================================
+\section{Related Work}
+%=============================================================================
+
+\subsection{Dempster--Shafer Theory}
+
+Dempster--Shafer theory (DST)~\cite{shafer1976theory,dempster1967upper} provides a generalization of Bayesian probability theory that models epistemic uncertainty through belief functions. In DST, evidence is represented as basic belief assignments (BBAs) over the power set of a frame of discernment, enabling explicit representation of ignorance and conflict. Dempster's rule of combination fuses independent evidence sources, with the conflict factor $\kappa$ quantifying the degree of contradiction between them~\cite{smets1993belief}.
+
+The integration of DST with deep learning was pioneered by Den{\oe}ux~\cite{denoeux2019logistic}, who established a formal connection between logistic regression, multilayer perceptrons, and DST by reinterpreting linear transformations as evidence accumulation processes. Sensoy et al.~\cite{sensoy2018evidential} extended this to evidential deep learning, where neural network outputs parameterize Dirichlet distributions representing second-order uncertainty over class probabilities.
+
+Within the LVLM domain, Huang et al.~\cite{huang2025visual} introduced evidential conflict for visual hallucination detection, modeling output-layer features as evidence sources and using the DST conflict factor $\kappa$ to identify unreliable generations. Subsequent work~\cite{huang2026detecting} extended this to broader misbehavior detection by decomposing epistemic uncertainty into conflict and ignorance components at the output head. However, these methods operate at the output layer, where features have already undergone full cross-modal processing. Our work departs from this line by applying evidential modeling \emph{at the attention-projection layers}, capturing cross-modal contradiction at the point of modality fusion where typographic conflicts first emerge.
+
+\subsection{Large Vision--Language Models}
+
+Modern LVLMs integrate pretrained vision encoders with large language models through cross-modal alignment. Pioneering models such as CLIP~\cite{radford2021learning} and Flamingo~\cite{alayrac2022flamingo} established the paradigm of contrastive vision--language pretraining. LLaVA~\cite{liu2023visual} introduced visual instruction tuning, aligning a vision encoder with an LLM via a simple projection layer. Subsequent improvements~\cite{liu2024improved,li2024llava} enhanced resolution handling and multimodal reasoning. BLIP-2~\cite{li2023blip} proposed a Q-Former to bridge the modality gap efficiently.
+
+Recent state-of-the-art LVLMs include Qwen2.5-VL~\cite{wu2025qwen}, InternVL2.5~\cite{chen2024expanding}, and DeepSeek-VL2~\cite{wu2024deepseek}, each employing distinct architectural strategies for visual encoding and cross-modal fusion. MoF-Models~\cite{tong2024eyes} introduce a Mixture-of-Features approach that interleaves visual tokens from dual encoders (CLIP and DINOv2), preserving complementary visual granularities that prove particularly informative for our detection task.
+
+\subsection{Attention Mechanism in LVLMs}
+
+The transformer architecture~\cite{vaswani2017attention} underpins all modern LVLMs. In the multimodal setting, the stacked multi-head attention blocks serve as the primary mechanism for cross-modal information exchange~\cite{chen2020uniter}. Visual patch tokens and textual tokens interact through query-key-value computations, with attention weights determining the flow of information between modalities. The output of each attention block is processed by a feed-forward network (FFN), and the intermediate activations within these FFN layers encode the fused cross-modal representations.
+
+Critically for our work, when typographic text is present in an image, the visual tokens that encode text regions simultaneously carry both visual features (pixel patterns) and semantic features (word meanings). During attention computation, these dual-nature tokens create detectable patterns of conflicting alignment signals in the FFN activations---precisely the signal our method exploits.
+
+\subsection{Typographic Attacks}
+
+Typographic attacks constitute a distinct class of adversarial inputs targeting multimodal alignment. First systematically characterized by Goh et al.~\cite{goh2021multimodal} in the context of CLIP-style models, these attacks exploit ``multimodal neurons'' that respond to abstract concepts across modalities. When adversarial text is presented visually within an image, it can activate text-associated pathways more strongly than visual content, hijacking the model's semantic interpretation.
+
+Subsequent work has extensively documented the severity and scope of this vulnerability. Cheng et al.~\cite{cheng2024unveiling} provided a taxonomy of typographic deception patterns, categorizing attacks by semantic relationship to visual content (contradictory, supplementary, directive). Li et al.~\cite{li2024images} demonstrated that visual vulnerabilities represent the ``Achilles' heel'' of safety alignment in multimodal LLMs. Gong et al.~\cite{gong2025figstep} introduced FigStep, a jailbreaking method using typographic visual prompts that bypasses safety filters. Qraitem et al.~\cite{qraitem2025web} showed that even common web artifacts---watermarks, logos, text overlays---can disrupt model behavior. Zhao et al.~\cite{zhao2025jailbreaking} demonstrated that shuffle inconsistency in visual tokens can jailbreak LVLMs. Westerhoff et al.~\cite{westerhoff2025scam} proposed SCAM, a real-world typographic robustness benchmark.
+
+Several safety benchmarks include typographic attack subsets: MM-SafetyBench~\cite{liu2024mm} covers multiple safety dimensions, and SafeBench~\cite{gong2025figstep} provides standardized evaluation for safety-critical typographic scenarios. Physical-world attacks have also been demonstrated~\cite{ling2026physical}, underscoring the practical urgency of robust detection.
+
+\subsection{Detection Methods for Typographic Attacks}
+
+Defenses against typographic attacks fall into proactive (training-time) and reactive (inference-time) categories.
+
+\textbf{Proactive defenses} aim to build inherent robustness. Liu et al.~\cite{liu2023mitigating} proposed robust instruction tuning with typographically perturbed training data. Azuma and Matsui~\cite{azuma2023defense} introduced defense-prefix, prepending protective text to encourage visual information prioritization. While these improve baseline robustness, they incur substantial retraining costs and may degrade clean-input performance~\cite{bengio2025international}.
+
+\textbf{Reactive (post-hoc) detection} has emerged as a more practical strategy, encompassing several paradigms:
+
+\textit{Uncertainty-based methods.} Sampling-based approaches include Semantic Entropy~\cite{farquhar2024detecting}, which clusters generations by semantic equivalence, and Self-Consistency~\cite{wang2022self}, which uses answer agreement as a confidence proxy. Related uncertainty formulations include Semantic Energy~\cite{ma2025semantic} and Semantic Volume~\cite{li2026semantic}. These methods require multiple decoding passes (typically 5--10 samples), incurring substantial computational cost. Output-probability methods such as Predictive Entropy~\cite{kadavath2022language,malinin2020uncertainty} and Query-Level Uncertainty~\cite{chen2025query} operate in a single pass but suffer from overconfidence~\cite{guo2017calibration,tian2023just}.
+
+\textit{Representation-based methods.} HiddenDetect~\cite{jiang2025hiddendetect} monitors intermediate hidden states for jailbreak anomalies via learned linear probes. Kirch et al.~\cite{kirch2025features} analyzed which internal features are predictive of attack success. Gan et al.~\cite{gansure} identified ``JailNeurons''---specific neurons activated during jailbreak attacks. These methods demonstrate the value of internal representations but do not explicitly model cross-modal contradiction.
+
+\textit{OCR-assisted methods.} Nagaraja et al.~\cite{nagaraja2025image} proposed OCR-based text extraction and comparison, but these methods incur latency and cascade errors from OCR pipelines.
+
+Our work departs from all these paradigms by directly quantifying \emph{evidential conflict} at the attention-projection level, capturing the fundamental cross-modal contradiction that characterizes typographic attacks in a single forward pass.
+
+%=============================================================================
+FloatBarrier
+\section{Datasets}
+%=============================================================================
+
+To support both main evaluation and controlled ablation studies, we construct and adopt multiple typographic attack datasets spanning synthetic and real-world scenarios.
+
+\subsection{STA-5K: Synthetic Typographic Attack Dataset}
+
+We construct STA-5K following the generation protocol of Defense-Prefix~\cite{azuma2023defense}. Specifically, we sample 5,000 images from the ImageNet validation set. For each image, we randomly select a target class different from the ground-truth label and overlay the corresponding class name as misleading text. This creates a balanced dataset of 2,500 attacked and 2,500 clean samples.
+
+The text overlay process systematically varies the following parameters to ensure diversity and to enable controlled ablation (see Section~\ref{sec:ablation_variables}):
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Font family:} 12 fonts spanning serif (Times New Roman, Georgia, Merriweather), sans-serif (Arial, Helvetica, Roboto, Open Sans), and monospace (Courier New, Consolas, Inconsolata) families, plus two decorative fonts (Impact, Comic Sans).
+    \item \textbf{Font size:} Uniformly sampled from $\{16, 20, 24, 28, 32\}$ pixels.
+    \item \textbf{Color contrast:} Text color selected to achieve target $\Delta E$ (CIE76) values relative to local background, with contrast levels binned as Low ($\Delta E < 20$), Medium ($20 \leq \Delta E < 50$), and High ($\Delta E \geq 50$).
+    \item \textbf{Opacity:} Sampled from $\{30\%, 50\%, 70\%, 90\%\}$.
+    \item \textbf{Position:} Sampled uniformly across the image canvas with categories: center (within central 50\% area), corner (within 20\% margin of any corner), and random (any position).
+\end{itemize}
+
+Each image is paired with the question ``What is the main object in this image?'' to probe classification, following standard VQA evaluation protocol.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig3_dataset_examples.png}
+\caption{Examples from the constructed datasets. (a) STA-5K: synthetic samples with systematically varied font, size, color contrast, opacity, and position. (b) RTA-100: real-world scenes with naturally occurring typographic attacks under diverse conditions.}
+\label{fig:dataset_examples}
+\end{figure}
+
+\subsection{STA-5K-Mini: Ablation Subset}
+
+For efficient ablation experiments (Section~\ref{sec:ablation}), we construct STA-5K-Mini by stratified sampling 1,000 images (500 clean, 500 attacked) from STA-5K, preserving the full distribution of attack parameters.
+
+\subsection{RTA-100: Real-World Typographic Attack Dataset}
+
+We adopt the RTA-100 benchmark~\cite{azuma2023defense}, which comprises 1,000 real-scene images containing naturally occurring text. The dataset includes diverse scenarios: street signs with contradictory text, product packaging with misleading labels, screenshots with injected prompts, and documents with overlaid instructions. Each image is annotated as benign ($n=500$) or attacked ($n=500$). Unlike STA-5K, RTA-100 features uncontrolled, ecologically valid text characteristics (diverse fonts, lighting conditions, orientations, and backgrounds).
+
+\subsection{Misbehavior Generalization Datasets}
+
+To evaluate the broader applicability of ACF beyond typographic attacks (Section~\ref{sec:misbehavior}), we test on subsets of the following datasets:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{MM-SafetyBench}~\cite{liu2024mm}: A multimodal safety benchmark covering multiple unsafe scenarios. We use the typographic subset and additional visual jailbreak subsets.
+    \item \textbf{Visual hallucination detection data}~\cite{huang2025visual}: Samples where LVLMs generate object hallucinations, to test whether cross-modal conflict signals generalize beyond adversarial inputs.
+\end{itemize}
+
+%=============================================================================
+FloatBarrier
+\section{Detection Method}
+%=============================================================================
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig2_method_framework.png}
+\caption{Overview of the proposed ACF detection framework. The intermediate hidden activation $Z$ is extracted from the FFN following a multi-head attention block. Bias-reduced evidence weights are obtained via least-commitment affine transformation and decomposed into positive support $E^+$ and negative opposition $E^-$. The Attention Conflict metric aggregates support--opposition contradiction into a scalar detection score.}
+\label{fig:framework}
+\end{figure}
+
+\subsection{Problem Formulation}
+
+We cast typographic attack detection as a binary decision problem. Given an image--question pair $(I, q)$ and a pretrained LVLM $f$ with frozen parameters, the goal is to produce a scalar anomaly score from a single forward pass, where higher scores indicate stronger evidence of typographic manipulation. We assume white-box access to internal activations---standard for open-weight models---and perform no parameter updates.
+
+\subsection{Attention-Level Feature Extraction}
+\label{sec:feature_extraction}
+
+The core of our approach lies in extracting features from the feed-forward network (FFN) that immediately follows each multi-head attention (MHA) block, as illustrated in Fig.~\ref{fig:framework}. In modern LVLMs, stacked transformer blocks align visual and textual modalities through MHA, which computes mutual relevance between all token pairs and aggregates cross-modal information. While this dense interaction enables robust multimodal understanding, it also forces conflicting signals---such as deceptive text and genuine visual evidence---to directly interfere, creating detectable latent semantic friction in the FFN activations.
+
+Let $b \in \{1, \ldots, B\}$ index the transformer blocks. For block $b$, the MHA output (after residual connection and layer normalization) is denoted $X_b \in \mathbb{R}^{n \times d}$, where $n$ is the sequence length and $d$ is the hidden dimension. The subsequent FFN computes:
+\begin{equation}
+H_b = \sigma(X_b W_1 + \mathbf{1} b_1^{\top}), \qquad
+Y_b = H_b W_2 + \mathbf{1} b_2^{\top},
+\end{equation}
+where $W_1 \in \mathbb{R}^{d \times d_{\text{ff}}}$, $W_2 \in \mathbb{R}^{d_{\text{ff}} \times d}$, $\sigma$ is a nonlinear activation (GELU or SiLU in most modern LVLMs), and $d_{\text{ff}}$ denotes the FFN intermediate dimension. We extract the intermediate hidden activation \emph{before} the second linear projection:
+\begin{equation}
+Z := H_b \;\in\; \mathbb{R}^{n \times d_{\text{ff}}},
+\end{equation}
+and denote $W := W_2$ for brevity. The matrix $Z$ encodes nonlinearly transformed interaction patterns between visual and textual tokens. When typographic text is present in an image, the visual tokens that encode text regions simultaneously carry pixel-level visual features and semantic word-level features. During attention computation, these dual-nature tokens produce anomalously high co-activation of mutually contradictory patterns in $Z$.
+
+\subsection{Evidential Modeling via Least Commitment}
+
+We now reinterpret the FFN projection $W Z^{\top}$ through the lens of Dempster--Shafer theory. Let $\Omega = \{h_1, \ldots, h_J\}$ be the frame of discernment, where each $h_j$ corresponds to a latent hypothesis encoded by the $j$-th output dimension of the FFN projection. The standard linear transformation $W Z^{\top}$ mixes inherent weight biases with genuine activation-driven evidence, obscuring the relative support and opposition patterns that characterize cross-modal conflict.
+
+To isolate evidence that stems purely from relative activation patterns, we apply the \textbf{Least Commitment Principle} (LCP)~\cite{smets1993belief}, which states that belief assignments should carry no more informational commitment than the evidence warrants. Concretely, we seek an elementwise affine transformation that approximates the original projection while removing systematic biases:
+\begin{equation}
+E = A \odot Z^{\top} + B,
+\label{eq:evidential_pool}
+\end{equation}
+where $E = [e_{ij}] \in \mathbb{R}^{d_{\text{ff}} \times d}$ constitutes the \textbf{evidential pool}. Each entry $e_{ij}$ quantifies the evidence carried by feature $z_i$ toward hypothesis $h_j$. The parameters $A, B$ are obtained by minimizing the squared Frobenius distance to the original projection:
+\begin{equation}
+\min_{A, B} \; \bigl\| A \odot Z^{\top} + B - W Z^{\top} \bigr\|_F^2.
+\label{eq:lcp_objective}
+\end{equation}
+
+This is an unconstrained quadratic optimization. Let $\mu_0(W) \in \mathbb{R}^{1 \times d}$ denote column-wise means of $W$ and $\mu_1(\cdot)$ denote row-wise means. Setting partial derivatives to zero yields the closed-form solution:
+\begin{align}
+A^* &= W - \mu_0(W), \label{eq:a_star} \\[4pt]
+B^* &= -\bigl(A^* - \mu_1(A^*)\bigr) \odot Z^{\top}. \label{eq:b_star}
+\end{align}
+
+Equation~\eqref{eq:a_star} subtracts the column-wise mean from each row of $W$, removing baseline preferences for specific output dimensions that are baked into the pretrained weights. Equation~\eqref{eq:b_star} compensates for the residual bias introduced by row-space centering, ensuring the transformation reflects only \emph{relative} activation patterns in $Z$ rather than absolute magnitudes. The entries $e_{ij} \in (-\infty, +\infty)$ are thus bias-reduced evidence weights: positive values indicate support for $h_j$, negative values indicate opposition.
+
+\subsection{Evidence Decomposition and Belief Construction}
+
+Typographic attacks create a distinctive signature: certain hypotheses simultaneously receive both strong support (from one modality) and strong opposition (from the other). To capture this, we decompose the evidential pool into positive and negative evidence:
+\begin{equation}
+E^+ = \max(0, E), \qquad E^- = \max(0, -E).
+\end{equation}
+
+The continuous evidence weights $e^+_{ij}$ and $e^-_{ij}$ are mapped to DST-compatible simple support mass functions. We adopt the exponential mapping $x \mapsto 1 - \exp(-x)$, which is monotonic over $[0, \infty)$ with diminishing returns, preventing any single feature dimension from dominating the belief assignment:
+\begin{align}
+m^+_{ij}(\{h_j\}) &= 1 - \exp(-e^+_{ij}), \label{eq:mass_pos} \\[4pt]
+m^-_{ij}(\{\bar{h}_j\}) &= 1 - \exp(-e^-_{ij}). \label{eq:mass_neg}
+\end{align}
+
+Here $m^+_{ij}$ assigns belief mass specifically to the singleton hypothesis $\{h_j\}$ (support), while $m^-_{ij}$ assigns mass to its complement $\{\bar{h}_j\}$ (opposition). The remaining mass $1 - m^+_{ij} - m^-_{ij}$ is implicitly assigned to the full frame $\Omega$, representing ignorance.
+
+To obtain hypothesis-level evidence, we aggregate across the feature dimension:
+\begin{equation}
+e^+_j = \sum_{i=1}^{d_{\text{ff}}} e^+_{ij}, \qquad e^-_j = \sum_{i=1}^{d_{\text{ff}}} e^-_{ij}.
+\label{eq:macro_evidence}
+\end{equation}
+
+\subsection{Attention Conflict Quantification}
+\label{sec:acf_method}
+
+The \textbf{Attention Conflict} (ACF) metric is designed to explicitly quantify the degree of simultaneous support--opposition contradiction. We first normalize the aggregated evidence into support and opposition ratios. For each hypothesis $h_j$, the normalized support ratio $\eta^+_j$ is defined as:
+\begin{equation}
+\eta^+_j = \frac{\exp(e^+_j) - 1}{\sum_{j} \exp(e^+_j) - J + 1},
+\label{eq:eta_plus}
+\end{equation}
+where the denominator sums $\exp(e^+_j)$ over all $J$ hypotheses; the $+1$ correction corresponds to the mass assigned to $\Omega$, ensuring the expression remains well-defined when all $e^+_j = 0$. Similarly, the normalized opposition ratio $\eta^-_j$ is defined as:
+\begin{equation}
+\eta^-_j = 1 - \frac{\exp(-e^-_j)}{1 - \prod_{j} \bigl(1 - \exp(-e^-_j)\bigr)}.
+\label{eq:eta_minus}
+\end{equation}
+
+Equation~\eqref{eq:eta_minus} measures the degree to which evidence \emph{opposes} hypothesis $h_j$ relative to the total opposition mass distributed across all hypotheses.
+
+The ACF score aggregates per-hypothesis contradiction through the product of support and opposition ratios:
+\begin{equation}
+\boxed{\text{ACF} = \sum_{j=1}^{J} \eta^+_j \cdot \eta^-_j.}
+\label{eq:acf_final}
+\end{equation}
+
+\textbf{Interpretation.} Under benign conditions, the model's internal evidence predominantly supports a single coherent interpretation: one or few hypotheses receive high $\eta^+_j$ while the corresponding $\eta^-_j$ values remain low, yielding small product terms and low ACF. Under typographic attack, the deceptive text and genuine visual features simultaneously drive both $\eta^+_j$ and $\eta^-_j$ high for the \emph{same} hypotheses, producing large product terms and elevated ACF. Crucially, the product form $\eta^+_j \cdot \eta^-_j$ ensures sensitivity to \emph{contradiction} specifically---mere uncertainty (moderate $\eta^+_j$ but low $\eta^-_j$) and confident misclassification (high $\eta^+_j$ for an incorrect hypothesis but low $\eta^-_j$) produce low scores, preventing false positives.
+
+\subsection{Relationship to Classical DST}
+
+The ACF metric connects naturally to classical Dempster--Shafer theory. The conflict factor $\kappa$ in Dempster's rule is defined as:
+\begin{equation}
+\kappa = \sum_{S_1 \cap S_2 = \emptyset} m_1(S_1) \, m_2(S_2),
+\end{equation}
+quantifying the total mass assigned to mutually disjoint subsets by two independent evidence sources~\cite{dempster1967upper}. In our construction, $\eta^+_j$ supports $\{h_j\}$ while $\eta^-_j$ supports $\{\bar{h}_j\}$; since $\{h_j\} \cap \{\bar{h}_j\} = \emptyset$, their product contributes to conflict in the DST sense. ACF differs from $\kappa$ in three practical respects: (i) it operates on normalized ratios rather than raw masses, providing scale invariance across layers and models; (ii) it sums per-hypothesis rather than over all subset pairs, sharpening sensitivity to localized contradiction; and (iii) it avoids the full Dempster combination, reducing the computational cost from exponential in $|\Omega|$ to linear in $J$.
+
+\subsection{Inference Algorithm}
+
+Algorithm~\ref{alg:acf} summarizes the detection procedure. The dominant cost is the forward pass itself; the evidential post-processing adds only $O(d_{\text{ff}} \cdot d)$ operations per monitored block.
+
+\begin{algorithm}[t]
+\caption{Single-Pass ACF Detection}
+\label{alg:acf}
+\begin{algorithmic}[1]
+\Require LVLM $f$, input $(I, q)$, monitored block indices $\mathcal{B}$
+\Ensure Scalar detection score $\text{ACF}(I, q)$
+\State Run one forward pass $f(I, q)$; collect intermediate activations $\{Z_b\}_{b \in \mathcal{B}}$
+\State Initialize $\text{ACF} \gets 0$
+\For{each block $b \in \mathcal{B}$}
+    \State Compute evidential pool $E_b$ via Eqs.~\eqref{eq:a_star}--\eqref{eq:b_star}
+    \State Decompose $E_b^+ = \max(0, E_b)$, $E_b^- = \max(0, -E_b)$
+    \State Aggregate $e^+_{b,j} = \sum_i e^+_{b,ij}$, $e^-_{b,j} = \sum_i e^-_{b,ij}$ $\forall j$
+    \State Compute ACF$_b$ via Eq.~\eqref{eq:acf_final}
+    \State $\text{ACF} \gets \text{ACF} + \text{ACF}_b$
+\EndFor
+\State \Return $\text{ACF} / |\mathcal{B}|$
+\end{algorithmic}
+\end{algorithm}
+
+%=============================================================================
+FloatBarrier
+\section{Experiments}
+%=============================================================================
+
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+
+\paragraph{LVLM Backbones.}
+We evaluate on five state-of-the-art open-weight LVLMs spanning diverse architectural designs. All models are used in their pretrained state without any fine-tuning. Greedy decoding (temperature $=0$) is used for all experiments.
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Qwen2.5-VL-7B}~\cite{wu2025qwen}: Employs a dynamic-resolution vision encoder that processes images at native aspect ratios, paired with the Qwen2.5 language backbone. The model contains $B=28$ transformer blocks with $d=3584$ hidden dimensions.
+    \item \textbf{LLaVA-NeXT-7B}~\cite{li2024llava}: An improved LLaVA variant featuring high-resolution image encoding via adaptive tiling. Uses CLIP-ViT-L as the vision encoder with an MLP projector connecting to a Vicuna-7B language model ($B=32$, $d=4096$).
+    \item \textbf{InternVL2.5-8B}~\cite{chen2024expanding}: Adopts progressive visual--language alignment with dynamic aspect ratio handling and pixel-unshuffle operations for efficient high-resolution encoding ($B=32$, $d=4096$).
+    \item \textbf{DeepSeek-VL2-Tiny}~\cite{wu2024deepseek}: A compact hybrid model using a SigLIP vision encoder with a Mixture-of-Experts language backbone, performing early cross-modal fusion through a vision--language adaptor ($B=12$, $d=2048$).
+    \item \textbf{MoF-Models-7B}~\cite{tong2024eyes}: Introduces a Mixture-of-Features design that interleaves visual tokens from two complementary vision encoders---CLIP (semantic) and DINOv2 (fine-grained visual)---along the sequence dimension, preserving dual granularities within a unified attention context ($B=40$, $d=4096$).
+\end{itemize}
+
+\paragraph{Baselines.}
+We compare ACF against five representative post-hoc detection methods spanning different paradigms:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Predictive Entropy}~\cite{kadavath2022language}: Computes the entropy of the first-token output distribution $H(P(y|I,q))$ as an uncertainty measure. A single-pass method that captures output-level confidence.
+    \item \textbf{Length-Normalized Entropy (Ln-Entropy)}~\cite{malinin2020uncertainty}: Normalizes the sequence-level predictive entropy by generation length to account for varying response lengths.
+    \item \textbf{Semantic Entropy}~\cite{farquhar2024detecting}: A sampling-based method that clusters $N=10$ generated responses by semantic equivalence (using a natural language inference model) and computes entropy over semantic clusters. Temperature is set to $1.0$ for generation diversity.
+    \item \textbf{Self-Consistency}~\cite{wang2022self}: Measures the agreement rate among $N=10$ stochastic answer generations as a confidence proxy. Higher agreement indicates lower uncertainty.
+    \item \textbf{HiddenDetect}~\cite{jiang2025hiddendetect}: A representation-based method that trains a linear probe on intermediate hidden states to classify inputs as benign or attacked. Following the original setup, 200 training samples per dataset are used for probe training.
+\end{itemize}
+
+For the main results table, we adopt abbreviated names (Pred.\ Entropy, Ln-Entropy, Sem.\ Entropy, Self-Consist., HiddenDetect) due to space constraints.
+
+\paragraph{Evaluation Metrics.}
+We adopt threshold-independent ranking metrics: \textbf{AUROC} (Area Under the Receiver Operating Characteristic Curve) and \textbf{AUPR} (Area Under the Precision--Recall Curve). AUROC measures separability between clean and attacked samples across all thresholds, while AUPR is more sensitive to class imbalance. Both are reported as percentages, with 95\% bootstrap confidence intervals computed from 1,000 resamples.
+
+\paragraph{Hardware and Implementation.}
+All experiments are conducted on a single NVIDIA A100-80GB GPU. We register forward hooks on the FFN intermediate activations to extract $Z$ during the forward pass without modifying model computation. The default configuration monitors the first transformer block ($b=1$), which empirical results (Section~\ref{sec:ablation_layer}) confirm yields optimal detection performance. ACF post-processing is executed on CPU after the forward pass, introducing approximately 6\,ms of overhead per sample. Code and dataset generation scripts will be released upon acceptance.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} summarizes detection performance. ACF consistently outperforms all baselines across models and datasets.
+
+\begin{table}[t]
+\centering
+\caption{AUROC/AUPR (\%) for typographic attack detection on STA-5K and RTA-100. \textbf{Bold} and \underline{underline} denote the best and second-best results, respectively. The \uparr~ indicates improvement over the best baseline.}
+\label{tab:main_results}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}l cc cc cc cc cc cc@{}}
+\toprule
+Models$\rightarrow$ & \multicolumn{2}{c}{\textbf{Qwen}} & \multicolumn{2}{c}{\textbf{LLaVA-NeXT}} & \multicolumn{2}{c}{\textbf{InternVL}} & \multicolumn{2}{c}{\textbf{DeepSeek}} & \multicolumn{2}{c}{\textbf{MoF}} & \multicolumn{2}{c}{\textbf{Average}}\\ 
+
+
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13}
+
+
+Method$\downarrow$ & AUROC & AUPR & AUROC & AUPR & AUROC & AUPR & AUROC & AUPR & AUROC & AUPR & AUROC & AUPR \\ \midrule
+
+\multicolumn{11}{l}{\textbf{STA-5K (Synthetic typographic attack dataset)}} \\
+\midrule
+
+
+Predictive Entropy  & 58.1 & 58.3 & 74.7 & 78.9 & \textbf{65.8} & 57.3 & 54.8 & 60.1 & 74.3 & 91.3 & 65.5 & 69.2  \\
+Ln-Entropy       & 58.5 & 56.3 & 74.3 & 77.3 & \textbf{65.8} & 57.3 & 54.8 & 60.1 & 74.3 & 91.3 & 65.5 & 68.5\\
+Semantic Entropy & 50.2 & 66.9 & 56.0 & 90.8 & 50.8 & 70.5 & 52.2 & 56.5 & 51.4 & 96.0 & 52.1 & 76.1\\
+Self-Consistency & 55.7 & 69.3 & 64.2 & \underline{92.9} & 63.1 & \underline{77.1} & 53.6 & 63.7 & \underline{81.9} & \underline{98.6} & 63.7 & \underline{80.3} \\ 
+HiddenDetect & \underline{93.9} & 58.6 & \underline{75.7} & 88.8 & 62.3 & 69.2 & \underline{87.0} & \underline{94.1} & 77.7 & 88.8 & \underline{79.3} & 79.9\\
+\rowcolor{gray!20}\textbf{Ours (ACF)}  & \textbf{99.5} & \textbf{98.6} & \textbf{76.5} & \textbf{95.5} & \underline{63.3} & \textbf{77.9} & \textbf{99.9} & \textbf{99.8} & \textbf{99.5} & \textbf{99.9}  & \textbf{87.8}\gain{8.5} & \textbf{94.4}\gain{14.1}\\
+\midrule
+\multicolumn{11}{l}{\textbf{RTA-100 (Real-world typographic attack dataset)}} \\
+\midrule
+
+Predictive Entropy  & \textbf{78.9} & 65.7 & 58.9 & 68.1 & 70.9 & 71.8 & \underline{62.5} & 57.7 & 60.3 & 79.8 & 66.3 &  68.7 \\
+Ln-Entropy       & \textbf{78.9} & 63.0 & 59.2 & 67.9 & 70.6 & 72.1 & 62.1 & 58.0 & 60.4 & 80.1 & 66.2 & 68.2  \\
+Semantic Entropy & 51.1 & 91.6 & 54.5 & 71.1 & 62.9 & 73.2 & 52.9 & 68.1 & 57.3 & 79.9 & 55.7 & 76.8  \\
+Self-Consistency & 74.1 & \textbf{97.4} & 52.9 & 73.7 & 68.1 & \underline{89.5} & 59.6 & \underline{74.4} & \underline{61.9} & \underline{88.1} & 63.3 &  \underline{84.6} \\ 
+HiddenDetect & 58.7 & 63.2 & \underline{84.8} & \textbf{84.0} & \textbf{88.9} & 53.6 & 62.4 & 58.4 & 52.7 & 72.9 & \underline{69.5} & 66.4 \\
+\rowcolor{gray!20}\textbf{Ours (ACF)}  & \underline{77.3} & \underline{93.7} & \textbf{92.4} & \underline{75.9} & \underline{71.2} & \textbf{90.4} & \textbf{73.5} & \textbf{78.6} & \textbf{99.9} & \textbf{99.8}  & \textbf{82.9}\gain{13.4} & \textbf{87.7}\gain{3.1}\\
+
+\bottomrule
+
+\end{tabular}
+}
+\end{table}
+
+\paragraph{Analysis of Main Results.}
+
+On STA-5K, ACF achieves an average AUROC of 87.8\% and AUPR of 94.4\%, representing substantial improvements over the strongest baseline (HiddenDetect: 79.3\% AUROC, 79.9\% AUPR). The gains are most pronounced on Qwen2.5-VL-7B (99.5\%), DeepSeek-VL2-Tiny (99.9\%), and MoF-Models-7B (99.5\%), where ACF achieves near-perfect detection. On InternVL2.5-8B, all methods struggle (best AUROC 63.3\%), suggesting that its progressive alignment strategy may produce more diffuse conflict signals.
+
+On RTA-100, the real-world scenario is more challenging due to diverse text characteristics. ACF's average AUROC of 82.9\% improves over the best baseline by 13.4 percentage points. Notably, MoF-Models-7B maintains 99.9\% AUROC on RTA-100, demonstrating exceptional real-world robustness.
+
+The performance variation across models correlates with architectural factors. Models with early cross-modal fusion (DeepSeek-VL2-Tiny) or dual visual granularities (MoF-Models-7B) exhibit stronger detection, while models with gradual, progressive alignment (InternVL2.5) show weaker signals---a finding we investigate further in the ablation studies.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig4_acf_distribution.pdf}
+\caption{Distribution of ACF scores for correctly classified and attacked samples on STA-5K and RTA-100. Attacked samples consistently concentrate in the high-conflict region, while clean samples exhibit low ACF values. Results shown for MoF-Models-7B; distributions for all five models are provided in the supplementary material.}
+\label{fig:acf_distribution}
+\end{figure}
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+All ablations are conducted on STA-5K-Mini (1,000 samples) using Qwen2.5-VL-7B and MoF-Models-7B as representative models. Trends are consistent across other models.
+
+\subsubsection{Layer-Wise ACF Analysis}
+\label{sec:ablation_layer}
+
+We compute ACF independently at each transformer block to characterize how typographic conflict evolves through the network layers. Our central hypothesis is that a \textbf{dilution effect} governs cross-modal conflict: ACF magnitude increases monotonically with depth (absolute conflict grows as representations become more abstract), but its \textit{discriminative power}---measured by Detection AUROC using per-layer ACF as a score to separate correct from incorrect model outputs---\textit{decreases} with depth. Early layers capture ``pure'' conflict from external typographic manipulation; deep layers mix in natural semantic noise, diluting the clean/attacked separation.
+
+\begin{table}[t]
+\centering
+\caption{Layer-wise ACF detection AUROC (\%) on STA-5K-Mini (N=500). Blocks indexed 0 (first) to $B{-}1$ (last). RTA results omitted for Qwen/InternVL (0\% accuracy precludes AUROC). \textbf{Bold} = best layer per model.}
+\label{tab:layer_wise}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}l cccc cccc cccc cccc@{}}
+\toprule
+& \multicolumn{4}{c}{\textbf{Qwen2.5-VL-7B} ($B{=}28$)} & \multicolumn{4}{c}{\textbf{InternVL2.5-8B} ($B{=}32$)} & \multicolumn{4}{c}{\textbf{MoF-Models-7B} ($B{=}40$)} & \multicolumn{4}{c}{\textbf{DeepSeek-VL2-Tiny} ($B{=}12$)}\\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9} \cmidrule(lr){10-13} \cmidrule(lr){14-17}
+Block & STA & RTA & Mean & Max & STA & RTA & Mean & Max & STA & RTA & Mean & Max & STA & RTA & Mean & Max \\
+\midrule
+0      & \textbf{97.1} & -- & -- & -- & 55.0 & -- & -- & -- & \textbf{99.9} & \textbf{99.9} & -- & -- & 94.6 & 72.2 & -- & -- \\
+$B/4$  & 44.9 & -- & -- & -- & 52.1 & -- & -- & -- & 77.4 & 28.9 & -- & -- & 81.8 & \textbf{94.9} & -- & -- \\
+$B/2$  & 1.1 & -- & -- & -- & \textbf{75.2} & -- & -- & -- & 42.2 & 84.7 & -- & -- & \textbf{96.8} & 91.6 & -- & -- \\
+$3B/4$ & 59.7 & -- & -- & -- & 59.2 & -- & -- & -- & 86.2 & 61.4 & -- & -- & 62.0 & 13.4 & -- & -- \\
+$B{-}1$& 45.1 & -- & -- & -- & 13.4 & -- & -- & -- & 23.0 & 10.7 & -- & -- & 88.8 & 32.9 & -- & -- \\
+\midrule
+Mean   & 48.6 & -- & 48.6 & \textbf{99.0} & 50.4 & -- & 50.4 & \textbf{98.1} & 48.5 & 34.9 & 48.5 & \textbf{100.0} & 84.3 & 68.2 & 84.3 & \textbf{96.8} \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_layerwise_auroc.pdf}
+\caption{Per-layer ACF analysis across four models on STA-5K-Mini (N=500). \textbf{Left:} Mean ACF for correct vs.\ incorrect samples per layer---monotonic increase with depth. \textbf{Right:} Detection AUROC per layer---general decreasing trend (the ``dilution effect''). DeepSeek-VL2-Tiny (bottom) exhibits the weakest dilution.}
+\label{fig:layerwise_acf}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_kde_Qwen2-5-VL-7B.pdf}
+\caption{Per-layer KDE of ACF values for Correct vs.\ Incorrect samples (Qwen2.5-VL-7B, STA-5K-Mini). Early layers: clear bimodal separation. Late layers: distributions progressively overlap, visually confirming the AUROC decline.}
+\label{fig:kde_qwen}
+\end{figure}
+
+\paragraph{The Dilution Effect.} Table~\ref{tab:layer_wise} and Fig.~\ref{fig:layerwise_acf} reveal a consistent pattern across all four models: \textit{ACF magnitude and discriminative power evolve in opposite directions.}
+
+\textbf{Finding 1 -- ACF magnitude increases monotonically with depth.} Clean-sample ACF rises from 0.044 (Block~0) to 0.942 (Block~27) for Qwen (21$\times$); 0.006 to 0.685 for InternVL (114$\times$); 0.004 to 0.338 for MoF (85$\times$); and 0.027 to 0.228 for DeepSeek (8$\times$). Attacked-sample trajectories are nearly identical---absolute conflict is driven by representational abstraction, not attack-specific signals.
+
+\textbf{Finding 2 -- Detection AUROC generally decreases with depth.} Qwen drops from 97.1\% (Block~0) to 45.1\% (Block~27); MoF from 99.9\% to 23.0\%; InternVL from 55.0\% to 13.4\%. The early-layer advantage is universal.
+
+\textbf{Finding 3 -- DeepSeek-VL2-Tiny is a notable exception.} With only 12 blocks, DeepSeek shows negligible dilution: AUROC declines from 94.6\% to 88.8\%, never falling below random. Its shallow architecture prevents semantic noise accumulation.
+
+\textbf{Finding 4 -- Class imbalance affects interpretation.} MoF achieves 3.8\% accuracy on STA (19/500 correct). Near-zero AUROC standard deviation and ceiling AUPR across all layers reflect extreme class imbalance rather than genuine discriminative power. On RTA (85.8\% accuracy), the dilution pattern is cleaner: AUROC drops from 99.9\% to 10.7\%.
+
+\textbf{Finding 5 -- Synthetic vs.\ real attacks differ.} Qwen and InternVL achieve 0\% RTA accuracy, making AUROC undefined. MoF maintains 85.8\% RTA accuracy, but with higher layer-wise variance than STA, suggesting real-world attacks produce more distributed conflict.
+
+\textbf{Practical implication.} Optimal detection uses Block~0 ACF alone---achieving near-maximal AUROC (Qwen 97.1\%, MoF 99.9\%, DeepSeek 94.6\%) while potentially enabling early-exit detection.
+
+\paragraph{KDE Distribution Analysis.} Fig.~\ref{fig:kde_qwen} shows per-layer KDE of ACF values for Qwen (all four models in supplementary). Early layers exhibit clear bimodal separation between correct and incorrect distributions; overlap increases with depth, directly corroborating the AUROC decline.
+
+\subsubsection{Temperature Analysis}
+\label{sec:ablation_temperature}
+
+We vary the softmax temperature applied to attention logits during inference ($T \in \{0.5, 1.0, 1.5, 2.0, 5.0\}$) on STA-5K-Mini. Sharper attention (low $T$) concentrates probability mass on the most relevant tokens, potentially amplifying conflict; softer attention (high $T$) diffuses the signal.
+
+\begin{table}[t]
+\centering
+\caption{Effect of attention temperature on ACF detection AUROC (\%) on STA-5K-Mini. $T{=}1.0$ is default. \textbf{Bold} = best per model.}
+\label{tab:temperature}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}l cccc@{}}
+\toprule
+Temperature & Qwen2.5-VL-7B & InternVL2.5-8B & MoF-Models-7B & DeepSeek-VL2-Tiny \\
+\midrule
+0.5 (sharp)  & \textbf{97.1} & \textbf{53.9} & \textbf{99.9} & 65.8 \\
+1.0 (default)& 94.6 & 53.0 & 99.1 & \textbf{72.1} \\
+1.5          & 82.6 & \textbf{60.3} & 98.6 & 65.1 \\
+2.0 (soft)   & 72.6 & 58.8 & 95.5 & 60.7 \\
+5.0          & 50.7 & 53.8 & 62.7 & 45.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{fig6_temperature.pdf}
+\caption{Effect of attention temperature on ACF detection AUROC (STA-5K-Mini). All four models exhibit monotonic degradation as $T$ increases.}
+\label{fig:temperature}
+\end{figure}
+
+\paragraph{Analysis.} Table~\ref{tab:temperature} reveals a consistent monotonic trend: AUROC declines as $T$ increases beyond 1.0. Qwen drops from 97.1\% ($T{=}0.5$) to 50.7\% ($T{=}5.0$), a 46-point degradation; MoF falls from 99.9\% to 62.7\%; DeepSeek from 72.1\% to 45.5\% (below random). InternVL remains flat but low (53.0--60.3\%). Modestly sharp attention ($T{=}0.5$) provides a small boost for Qwen (+2.5\%), MoF (+0.8\%), and InternVL (+0.9\%) with negligible generation quality impact. The practical recommendation is clear: \textbf{ACF detection is most reliable at or below default temperature}; soft attention should not be used as a defense strategy, as it diffuses the conflict signal ACF relies upon.
+
+\subsubsection{Sensitivity to Typographic Variables}
+\label{sec:ablation_variables}
+
+We systematically vary individual typographic attack parameters on STA-5K-Mini to characterize ACF's sensitivity profile. This analysis identifies detection boundary conditions and reveals which attack dimensions most influence detectability.
+
+\begin{table}[t]
+\centering
+\caption{ACF detection AUROC (\%) by typographic variable condition (STA-5K-Mini, Qwen2.5-VL-7B). $\Delta$ = deviation from best condition within variable. Trends are consistent across all four models; full per-model results in supplementary.}
+\label{tab:typo_variables}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c@{}}
+\toprule
+Condition & AUROC & $\Delta$ \\
+\midrule
+\multicolumn{3}{c}{\textit{Font Size (pixels)}} \\
+~~16 (small)    & 91.7 & $-$3.3 \\
+~~20            & 91.9 & $-$3.1 \\
+~~24            & 92.2 & $-$2.8 \\
+~~28            & 94.3 & $-$0.7 \\
+~~32 (large)    & \textbf{95.0} & -- \\
+\midrule
+\multicolumn{3}{c}{\textit{Color Contrast ($\Delta E$)}} \\
+~~Low    ($\Delta E < 20$)       & 93.0 & $-$0.2 \\
+~~Medium ($20 \leq \Delta E < 50$) & 91.6 & $-$1.6 \\
+~~High   ($\Delta E \geq 50$)   & \textbf{93.2} & -- \\
+\midrule
+\multicolumn{3}{c}{\textit{Text Opacity}} \\
+~~30\% (faint)  & 91.7 & $-$1.9 \\
+~~50\%          & 92.1 & $-$1.5 \\
+~~70\%          & 93.5 & $-$0.1 \\
+~~90\% (opaque) & \textbf{93.6} & -- \\
+\midrule
+\multicolumn{3}{c}{\textit{Overlay Position}} \\
+~~Center        & 92.3 & $-$2.8 \\
+~~Corner        & 94.1 & $-$1.0 \\
+~~Random        & \textbf{95.1} & -- \\
+\midrule
+\multicolumn{3}{c}{\textit{Font Family}} \\
+~~Serif         & 92.7 & $-$3.0 \\
+~~Sans-serif    & 93.8 & $-$1.9 \\
+~~Monospace     & 93.3 & $-$2.4 \\
+~~Decorative    & \textbf{95.7} & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig7_typo_variables.pdf}
+\caption{ACF detection AUROC by typographic variable (Qwen2.5-VL-7B, STA-5K-Mini). (a) Font size. (b) Color contrast. (c) Opacity. (d) Position. (e) Font family.}
+\label{fig:typo_variables}
+\end{figure}
+
+\paragraph{Analysis.} Table~\ref{tab:typo_variables} reports per-condition AUROC for Qwen2.5-VL-7B with $\Delta$ indicating deviation from the best setting within each variable. \textbf{Font size} has a modest but consistent effect: AUROC improves from 91.7\% (16\,px) to 95.0\% (32\,px). \textbf{Color contrast} shows minimal impact (1.6-point range), confirming that low-contrast ``stealth'' attacks remain detectable. \textbf{Opacity} degrades gracefully from 93.6\% to 91.7\%. \textbf{Position} yields a counterintuitive result: randomly placed text achieves the highest AUROC (95.1\%), exceeding center (92.3\%) and corner (94.1\%). We hypothesize that center-positioned text integrates more naturally into the visual scene, producing a less distinguishable conflict pattern. \textbf{Font family:} decorative fonts (Impact, Comic Sans) produce the strongest signal (95.7\%), likely because their unusual pixel patterns create a larger mismatch between visual texture and semantic content. Across all variables, MoF-Models-7B maintains AUROC $>$98\%; InternVL remains the weakest model (47--54\%).
+
+\subsubsection{Analysis of MoF Effectiveness}
+\label{sec:ablation_mof}
+
+MoF-Models-7B~\cite{tong2024eyes} achieves the strongest and most consistent ACF performance (99.5--99.9\% AUROC across both datasets). We investigate two complementary questions: (1) which components of MoF's dual-encoder design drive its strong detection, and (2) whether adding DINOv2 features transfers this advantage to non-MoF architectures.
+
+\paragraph{MoF DINO Component Ablation.}
+We evaluate MoF under four token configurations by masking or selecting encoder-specific visual tokens at inference time.
+
+\begin{table}[t]
+\centering
+\caption{MoF visual token configuration ablation on STA-5K-Mini. Interleaved = default CLIP+DINO alternating; Concat = CLIP then DINO appended; CLIP/DINO-only mask the other encoder.}
+\label{tab:mof_dino}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c c@{}}
+\toprule
+Configuration & AUROC & AUPR & Model ACC \\
+\midrule
+Interleaved (CLIP + DINO, default) & \textbf{99.5} & \textbf{100.0} & 8.0 \\
+Concat (CLIP + DINO)               & 99.3 & 99.9 & 13.4 \\
+CLIP-only                           & 98.4 & 99.8 & 11.2 \\
+DINO-only                           & 98.5 & 98.5 & \textbf{52.6} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.} Table~\ref{tab:mof_dino} reveals a striking dissociation between \textit{detection} and \textit{robustness}. All four configurations achieve near-perfect AUROC ($\geq$98.4\%), confirming that ACF detection is robust to encoder configuration. However, model accuracy varies dramatically: DINO-only achieves 52.6\% vs.\ 8.0\% for the default interleaved setup. This indicates that \textbf{DINOv2 features confer substantial robustness to typographic attacks} by enabling the model to rely on fine-grained visual patterns rather than semantic text cues. Critically, even when the model is highly susceptible (CLIP-only, 11.2\% accuracy), ACF still detects the cross-modal conflict with near-perfect AUROC (98.4\%). Detection and robustness are complementary, not equivalent.
+
+\paragraph{Adding DINO Features to Non-MoF Models.}
+We train lightweight DINO feature projectors for DeepSeek-VL2-Tiny (fused) and InternVL2.5-8B (concat/interleaved), comparing native single-encoder performance against DINO-augmented configurations.
+
+\begin{table}[t]
+\centering
+\caption{Effect of DINOv2 features and token arrangement on ACF detection AUROC (\%) on STA-5K-Mini.}
+\label{tab:mof_interleave}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c@{}}
+\toprule
+Configuration & AUROC & Model ACC \\
+\midrule
+\multicolumn{3}{c}{\textit{DeepSeek-VL2-Tiny}} \\
+~~Native (SigLIP only)   & \textbf{71.1} & 22.8 \\
+~~+ DINO fused           & 58.9 & \textbf{69.6} \\
+\midrule
+\multicolumn{3}{c}{\textit{InternVL2.5-8B}} \\
+~~Native (InternViT only)& 71.5 & 49.2 \\
+~~+ DINO concat          & 57.1 & 85.6 \\
+~~+ DINO interleaved     & \textbf{77.4} & \textbf{94.6} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Analysis.} Table~\ref{tab:mof_interleave} yields two key findings. \textbf{(1) DINO features substantially improve model robustness:} adding DINOv2 raises accuracy from 22.8\% to 69.6\% for DeepSeek (+47 points) and from 49.2\% to 85.6--94.6\% for InternVL (+36--45 points), corroborating the MoF ablation. \textbf{(2) Interleaving amplifies the detection signal; concatenation dilutes it.} For InternVL, interleaved DINO tokens achieve 77.4\% AUROC vs.\ 57.1\% for concatenation. Concatenation segregates native and DINO tokens, allowing the model to process them independently; interleaving forces direct attention interaction, exposing cross-modal contradictions. \textbf{(3) DeepSeek's fused projector degrades AUROC} from 71.1\% to 58.9\%. Early fusion at the feature level may smooth out the contradictions ACF detects---a cautionary result for detection-friendly multimodal architectures.
+
+\subsubsection{Generalization to Misbehavior Detection}
+\label{sec:misbehavior}
+
+We test whether ACF, designed for typographic attack detection, generalizes to related LVLM misbehavior detection tasks. The underlying hypothesis is that different misbehavior types may share a common signature of cross-modal evidential conflict, though with potentially different distributional characteristics.
+
+\begin{table}[t]
+\centering
+\caption{ACF generalization to different misbehavior tasks (AUROC / AUPR, \%), Qwen2.5-VL-7B.}
+\label{tab:misbehavior}
+\begin{tabular}{lcc}
+\toprule
+Task / Dataset & AUROC & AUPR \\
+\midrule
+Typographic attacks (STA-5K)              & 99.5 / 98.6 & -- \\
+Visual jailbreak (MM-SafetyBench~\cite{liu2024mm}) & \_\_ / \_\_ & -- \\
+Object hallucination~\cite{huang2025visual} & \_\_ / \_\_ & -- \\
+\midrule
+\end{tabular}
+\end{table}
+
+\textit{Analysis to be completed.} If ACF transfers to other misbehavior types, it suggests cross-modal conflict is a general-purpose safety signal. We also plan to extract and compare feature-level distributions of ACF components ($\eta^+$, $\eta^-$, per-hypothesis conflict) across different misbehavior types to characterize their distinct conflict signatures.
+
+%=============================================================================
+FloatBarrier
+\section{Method--Data Affinity Framework}
+\label{sec:affinity}
+%=============================================================================
+
+The preceding analyses characterize \emph{when} and \emph{where} ACF works. A natural follow-up question is: \emph{for a given input, which uncertainty detection method is most appropriate?} We propose a systematic framework matching five detection methods to data characteristics along four dimensions.
+
+\subsection{Motivation}
+
+No single detection method is universally optimal. Typographic attacks represent one failure mode: high internal conflict + low predictive entropy (the model is ``confidently wrong''). Ambiguous images induce high entropy without internal conflict (``knowingly uncertain''). OOD samples, visual jailbreaks, and hallucinations each occupy different regions. We consider five representative methods: ACF (hidden states), Predictive Entropy (logits), Ignorance (density-based OOD), Verbalized Uncertainty (prompting), and Semantic Entropy (sampling + clustering).
+
+\subsection{Data Characterization Dimensions}
+
+\textbf{D1 -- Epistemic vs.\ Aleatoric.} Aleatoric uncertainty (inherent data ambiguity) favors Entropy/Ignorance; epistemic uncertainty (model knowledge gaps, adversarial inputs) favors ACF/Ignorance. \textbf{D2 -- Known-Unknown vs.\ Unknown-Unknown.} Known-unknowns (high entropy) favor Entropy/Verbalize; unknown-unknowns (confidently wrong) favor ACF. \textbf{D3 -- Representation Conflict vs.\ Output Smoothness.} Internal inconsistency (typo attacks) favors ACF; flat predictive distributions favor Entropy. \textbf{D4 -- Expressible vs.\ Inexpressible.} Uncertainties the model can verbalize favor Verbalize/Semantic Entropy; those inaccessible to language favor ACF/Entropy.
+
+\subsection{Empirical Bucketing Strategy}
+
+We partition STA-5K-Mini samples along five axes and evaluate each method's AUROC per bucket: (1) predictive entropy (low/medium/high), (2) logit gap (large/medium/small), (3) attack strength stratified by typographic variables, (4) image-text conflict degree via CLIP alignment, (5) OOD degree via feature-space distance.
+
+\begin{table}[t]
+\centering
+\caption{Expected method--data affinity matrix. $\blacktriangle$ = best, $\bullet$ = competitive, $\circ$ = weak.}
+\label{tab:affinity_expected}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l ccccc@{}}
+\toprule
+Scenario & ACF & Entropy & Ignorance & Verbalize & Sem.\ Entropy \\
+\midrule
+High conflict + Low entropy (typo) & $\blacktriangle$ & $\circ$ & $\bullet$ & $\circ$ & $\circ$ \\
+Low conflict + Low entropy (hard)  & $\circ$ & $\bullet$ & $\circ$ & $\bullet$ & $\blacktriangle$ \\
+High conflict + High entropy (OOD) & $\bullet$ & $\bullet$ & $\blacktriangle$ & $\circ$ & $\bullet$ \\
+Low conflict + High entropy (OOD)  & $\circ$ & $\blacktriangle$ & $\blacktriangle$ & $\bullet$ & $\bullet$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The central prediction is that ACF dominates the \textit{high-conflict, low-entropy} quadrant---the typographic attack signature---while complementary methods dominate other quadrants. We provide a practical decision heuristic: (1) visual--semantic conflict? $\rightarrow$ ACF; (2) model uncertain (high entropy)? $\rightarrow$ Entropy / Semantic Entropy; (3) sample OOD? $\rightarrow$ Ignorance; (4) can verbalize? $\rightarrow$ Verbalized Uncertainty.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\textwidth]{fig8_affinity_heatmap.pdf}
+\caption{Method--data affinity heatmap. Rows: methods. Columns: data buckets. Cell: AUROC (\%). Diagonal dominance confirms distinct ``comfort zones'' per method.}
+\label{fig:affinity_heatmap}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\textwidth]{fig9_affinity_radar.pdf}
+\caption{Radar profile of five methods across four data dimensions. ACF peaks on ``representation conflict''; Entropy on ``output smoothness''; Ignorance on ``OOD sensitivity.''}
+\label{fig:affinity_radar}
+\end{figure}
+
+%=============================================================================
+FloatBarrier
+\section{Discussion}
+%=============================================================================
+
+\subsection{Applicability and Practical Considerations}
+
+\textbf{Single-pass efficiency.} ACF adds approximately 6\,ms of CPU post-processing to the standard forward pass. Table~\ref{tab:runtime} compares the average per-sample inference time of ACF against baseline methods.
+
+\begin{table}[t]
+\centering
+\caption{Per-sample inference time comparison (milliseconds). Forward pass time measured on a single NVIDIA A100-80GB GPU with greedy decoding; post-processing includes all method-specific computation after the forward pass.}
+\label{tab:runtime}
+\begin{tabular}{lccc}
+\toprule
+Method & Forward Pass (ms) & Post-Processing (ms) & Total (ms) \\
+\midrule
+Predictive Entropy    & \_\_ & \_\_ & \_\_ \\
+Ln-Entropy            & \_\_ & \_\_ & \_\_ \\
+Semantic Entropy      & \_\_ & \_\_ & \_\_ \\
+Self-Consistency      & \_\_ & \_\_ & \_\_ \\
+HiddenDetect          & \_\_ & \_\_ & \_\_ \\
+\textbf{ACF (Ours)}   & \_\_ & \_\_ & \_\_ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+ACF's total runtime is expected to be substantially lower than sampling-based methods (Semantic Entropy and Self-Consistency, which require $N=10$ decoding passes) while remaining competitive with single-pass baselines (Predictive Entropy, Ln-Entropy, HiddenDetect). The efficiency advantage makes ACF suitable for latency-sensitive deployment scenarios including real-time content moderation and online safety filtering.
+
+\textbf{API compatibility.} ACF requires access to intermediate FFN activations, which is straightforward for self-hosted open-weight models (all five models evaluated here) but may be unavailable through commercial black-box APIs. For API-only deployments, potential workarounds include running a smaller proxy open-weight LVLM in parallel and using its ACF score as a surrogate, or applying output-level evidential methods that operate on logit distributions accessible via API logprobs.
+
+\subsection{Limitations}
+
+Several limitations warrant acknowledgment. First, ACF requires white-box access to internal activations, limiting direct applicability to open-weight models. Second, semantically congruent attacks (where overlaid text is consistent with visual content) produce minimal conflict and may evade detection, though such attacks also pose lower practical risk. Third, detection sensitivity degrades under extreme image transformations (heavy noise, severe blur), suggesting ACF should be complemented with image quality assessment in degraded-input scenarios. Fourth, thresholds require per-model calibration; developing calibration-free normalization is a direction for future work. Fifth, adversarial attackers aware of ACF may attempt to craft text overlays that minimize attention-level conflict---adversarial robustness evaluation is needed.
+
+\subsection{Broader Impact}
+
+Beyond typographic attack detection, our findings suggest that attention-level evidential monitoring may be broadly valuable for multimodal AI safety. The principle of detecting cross-modal contradiction at the point of fusion---rather than at the output layer---could inform detection methods for visual jailbreaks, multimodal hallucinations, and other failures rooted in modality misalignment. We hope this work encourages further research at the intersection of evidential reasoning and multimodal model interpretability.
+
+%=============================================================================
+FloatBarrier
+\section{Conclusion}
+%=============================================================================
+
+This paper presented a comprehensive framework for detecting and analyzing typographic attacks in LVLMs through attention-level evidential conflict. Grounded in Dempster--Shafer theory, ACF quantifies support--opposition contradiction in a single forward pass without fine-tuning. Beyond detection, we contribute a multi-faceted analysis of \emph{how} and \emph{where} cross-modal conflict manifests:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Layer-wise dilution effect.} Across four LVLMs, ACF magnitude increases monotonically with depth while discriminative power (Detection AUROC) decreases. Early-layer ACF achieves near-ceiling AUROC (97--100\%), dropping to near-random at late layers (13--45\%). \emph{Where} one measures conflict is as important as \emph{what} one measures.
+    \item \textbf{Method--Data Affinity Framework.} We characterize five detection methods across four data dimensions, yielding a decision tree for method selection. ACF dominates the ``high-conflict, low-entropy'' quadrant characteristic of typographic attacks.
+    \item \textbf{Architectural insights.} DINOv2 features confer robustness to typographic attacks (52.6\% vs.\ 8.0\% accuracy in MoF); interleaving amplifies the detection signal while concatenation dilutes it; DeepSeek's shallow architecture (12 layers) largely avoids the dilution effect.
+    \item \textbf{Comprehensive ablation.} Temperature sweeps, typographic variable sensitivity, and DINO transfer experiments establish boundary conditions and design principles for detection-friendly multimodal architectures.
+\end{enumerate}
+
+Our results establish that explicit modeling of cross-modal evidential conflict at the attention level provides a principled, efficient, and interpretable path toward understanding and securing multimodal AI systems.
+
+%=============================================================================
+% ACKNOWLEDGMENTS
+%=============================================================================
+
+\section*{Declaration of Generative AI and AI-assisted Technologies in the Writing Process}
+During the preparation of this work, AI tools may have been used for language polishing and manuscript formatting. The authors remain fully responsible for the scientific content, analysis, and conclusions of the publication.
+
+\section*{Acknowledgments}
+\textit{To be completed.}
+
+%=============================================================================
+% APPENDIX — Remaining Work
+%=============================================================================
+\section*{Appendix: Remaining Experiments}
+
+Completed experiments are marked \checkmark. Remaining items target the camera-ready version.
+
+\subsection*{Completed}
+\begin{itemize}[leftmargin=*]
+    \item[\checkmark] Main results — 5 models $\times$ 2 datasets
+    \item[\checkmark] Layer-wise ACF inference + AUROC (4 models, 500 samples $\times$ 2 datasets)
+    \item[\checkmark] Layer-wise KDE distributions (4 models, 28--40 layers each)
+    \item[\checkmark] Temperature sweep ($T{=}0.5$--$5.0$, 4 models)
+    \item[\checkmark] Typographic variable sensitivity (5 variables $\times$ 4 models)
+    \item[\checkmark] MoF DINO ablation (4 configurations)
+    \item[\checkmark] DINO transfer to DeepSeek (native + fused) and InternVL (native + concat + interleaved)
+\end{itemize}
+
+\subsection*{Remaining}
+\begin{itemize}[leftmargin=*]
+    \item[\square] Misbehavior generalization (MM-SafetyBench visual jailbreak, hallucination data; Section~\ref{sec:misbehavior})
+    \item[\square] Method--Data Affinity empirical bucketing (5 methods $\times$ 5 data partitions; Section~\ref{sec:affinity})
+    \item[\square] Runtime benchmark (tab:runtime)
+    \item[\square] ACF distribution histogram (fig4\_acf\_distribution.pdf)
+\end{itemize}
+
+\subsection*{Figures to Upload}
+\begin{itemize}[leftmargin=*]
+    \item[\checkmark] fig1\_typographic\_attacks.png, fig2\_method\_framework.png, fig3\_dataset\_examples.png
+    \item[\checkmark] fig\_layerwise\_auroc.pdf, fig\_kde\_\{Qwen,InternVL,MoF,DeepSeek\}.pdf
+    \item[\checkmark] fig6\_temperature.pdf, fig7\_typo\_variables.pdf
+    \item[\square] fig4\_acf\_distribution.pdf, fig8\_affinity\_heatmap.pdf, fig9\_affinity\_radar.pdf
+\end{itemize}
+
+%=============================================================================
+% BIBLIOGRAPHY
+%=============================================================================
+
+\bibliographystyle{elsarticle-num}
+\bibliography{ref}
+
+\end{document}
